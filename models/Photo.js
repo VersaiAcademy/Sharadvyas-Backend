@@ -13,4 +13,14 @@ const photoSchema = new mongoose.Schema({
   downloads: { type: Number, default: 0 },
 }, { timestamps: true });
 
+// Transform _id to id when converting to JSON
+photoSchema.set('toJSON', {
+  transform: (doc, ret) => {
+    ret.id = ret._id.toString();
+    delete ret._id;
+    delete ret.__v;
+    return ret;
+  }
+});
+
 module.exports = mongoose.model('Photo', photoSchema);

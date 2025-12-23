@@ -6,4 +6,14 @@ const adminSchema = new mongoose.Schema({
   name: { type: String, required: true },
 }, { timestamps: true });
 
+// Transform _id to id when converting to JSON
+adminSchema.set('toJSON', {
+  transform: (doc, ret) => {
+    ret.id = ret._id.toString();
+    delete ret._id;
+    delete ret.__v;
+    return ret;
+  }
+});
+
 module.exports = mongoose.model('Admin', adminSchema);
