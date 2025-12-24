@@ -1,8 +1,10 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const crypto = require('crypto');
 const cloudinary = require('cloudinary').v2;
 const auth = require('../middleware/auth');
+const Photo = require('../models/Photo');
 
 const router = express.Router();
 
@@ -82,23 +84,43 @@ router.post('/photo', auth, (req, res) => {
         return res.status(400).json({ error: 'No files uploaded' });
       }
 
-      const uploadPromises = req.files.map((file, index) => {
+      const uploadPromises = req.files.map(async (file, index) => {
+        console.log(`Processing file ${index + 1}: ${file.originalname} (${file.size} bytes)`);
+        
+        // Generate hash from file buffer
+        const hash = crypto.createHash('sha256').update(file.buffer).digest('hex');
+        console.log(`Generated hash for file ${index + 1}: ${hash.substring(0, 16)}...`);
+        
+        // Check if photo with this hash already exists
+        const existingPhoto = await Photo.findOne({ hash });
+        if (existingPhoto) {
+          console.log(`Duplicate found for file ${index + 1}, reusing existing photo: ${existingPhoto._id}`);
+          return {
+            url: existingPhoto.cloudinary_url,
+            publicId: existingPhoto.cloudinary_public_id,
+            width: existingPhoto.width,
+            height: existingPhoto.height,
+            thumbnail: existingPhoto.thumbnail_url,
+            hash,
+            reused: true
+          };
+        }
+        
+        // Validate file buffer
+        if (!file.buffer || file.buffer.length === 0) {
+          throw new Error(`Invalid file buffer for ${file.originalname}`);
+        }
+        
+        // Upload to Cloudinary
         return new Promise((resolve, reject) => {
-          console.log(`Starting upload for file ${index + 1}: ${file.originalname} (${file.size} bytes)`);
-          
-          // Validate file buffer
-          if (!file.buffer || file.buffer.length === 0) {
-            reject(new Error(`Invalid file buffer for ${file.originalname}`));
-            return;
-          }
+          console.log(`Starting Cloudinary upload for file ${index + 1}`);
           
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: 'photos',
-              resource_type: 'image', // Explicitly set for images
-              // Optimize for DSLR images - maintain quality
-              quality: 'auto', // Safe optimization
-              timeout: 60000 // 60 second timeout
+              resource_type: 'image',
+              quality: 'auto',
+              timeout: 60000
             },
             (error, result) => {
               if (error) {
@@ -112,12 +134,13 @@ router.post('/photo', auth, (req, res) => {
                   width: result.width,
                   height: result.height,
                   thumbnail: cloudinary.url(result.public_id, { width: 300, height: 300, crop: 'fill' }),
+                  hash,
+                  reused: false
                 });
               }
             }
           );
           
-          // Handle stream errors
           stream.on('error', (streamError) => {
             console.error(`Stream error for file ${index + 1}:`, streamError);
             reject(new Error(`Stream error for ${file.originalname}: ${streamError.message}`));
@@ -127,36 +150,36 @@ router.post('/photo', auth, (req, res) => {
         });
       });
 
-      console.log(`Starting upload for ${uploadPromises.length} files...`);
+      console.log(`Processing ${uploadPromises.length} files...`);
       
-      // Use Promise.allSettled to handle partial failures
-      const settledResults = await Promise.allSettled(uploadPromises);
-      
+      // Process uploads sequentially to avoid overwhelming Cloudinary
       const results = [];
-      const errors = [];
-      
-      settledResults.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          results.push(result.value);
-        } else {
-          console.error(`Upload failed for file ${index + 1}:`, result.reason);
-          errors.push(`File ${index + 1}: ${result.reason.message}`);
-        }
-      });
-      
-      if (errors.length > 0) {
-        if (results.length === 0) {
-          // All failed
-          return res.status(500).json({ error: 'All uploads failed: ' + errors.join('; ') });
-        } else {
-          // Some failed - still return successful ones but log errors
-          console.warn('Partial upload failure:', errors);
-          // For now, return successful ones - you might want to handle this differently
+      for (let i = 0; i < uploadPromises.length; i++) {
+        try {
+          const result = await uploadPromises[i];
+          results.push(result);
+          console.log(`File ${i + 1} processed successfully`);
+        } catch (error) {
+          console.error(`File ${i + 1} processing failed:`, error);
+          results.push({ error: error.message, fileIndex: i + 1 });
         }
       }
       
-      console.log(`${results.length} files uploaded successfully`);
-      res.json(results);
+      // Separate successful and failed uploads
+      const successful = results.filter(r => !r.error);
+      const failed = results.filter(r => r.error);
+      
+      if (successful.length === 0) {
+        return res.status(500).json({ error: 'All uploads failed: ' + failed.map(f => f.error).join('; ') });
+      }
+      
+      // Return successful uploads, log failures
+      if (failed.length > 0) {
+        console.warn('Partial upload failure:', failed);
+      }
+      
+      console.log(`${successful.length} files processed successfully`);
+      res.json(successful);
     } catch (error) {
       console.error('Upload processing error:', error);
       res.status(500).json({ error: 'Internal server error during upload processing' });
