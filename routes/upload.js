@@ -5,7 +5,10 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+});
 
 // Test Cloudinary connection
 router.get('/test-cloudinary', async (req, res) => {
