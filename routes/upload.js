@@ -1,15 +1,30 @@
 const express = require('express');
 const multer = require('multer');
+const path = require('path');
 const cloudinary = require('cloudinary').v2;
-const crypto = require('crypto');
 const auth = require('../middleware/auth');
-const Photo = require('../models/Photo');
 
 const router = express.Router();
 
-const upload = multer({ 
+// Multer configuration for DSLR images
+const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
+  limits: {
+    fileSize: 25 * 1024 * 1024, // 25MB per file
+    files: 10 // Max 10 files
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept common DSLR image formats
+    const allowedTypes = /jpeg|jpg|png|webp|heic/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      return cb(new Error('Invalid file type. Only images (jpg, jpeg, png, webp, heic) are allowed.'));
+    }
+  }
 });
 
 // Test Cloudinary connection
@@ -30,63 +45,80 @@ router.get('/test-cloudinary', async (req, res) => {
   }
 });
 
-// Upload photo
-router.post('/photo', auth, upload.array('files', 10), async (req, res) => {
-  try {
-    cloudinary.config({
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY,
-      api_secret: process.env.CLOUDINARY_API_SECRET,
-    });
-
-    console.log('Upload request received');
-    console.log('Files:', req.files ? `${req.files.length} files` : 'missing');
-
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
+// Upload photo with explicit error handling
+router.post('/photo', auth, (req, res) => {
+  upload.array('files', 10)(req, res, async (err) => {
+    // Handle Multer errors explicitly
+    if (err) {
+      console.error('Multer error:', err);
+      
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large. Maximum size is 25MB per file.' });
+      }
+      
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        return res.status(400).json({ error: 'Too many files. Maximum 10 files allowed.' });
+      }
+      
+      if (err.message.includes('Invalid file type')) {
+        return res.status(415).json({ error: err.message });
+      }
+      
+      // Generic multer error
+      return res.status(400).json({ error: 'Upload error: ' + err.message });
     }
 
-    // Check for duplicates
-    const hashes = req.files.map(file => crypto.createHash('sha256').update(file.buffer).digest('hex'));
-    const existingPhotos = await Photo.find({ hash: { $in: hashes } });
-    if (existingPhotos.length > 0) {
-      return res.status(400).json({ error: 'Duplicate images detected. Some images already exist.' });
-    }
-
-    const uploadPromises = req.files.map((file, index) => {
-      const hash = hashes[index];
-      return new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: 'photos',
-            resource_type: 'auto',
-          },
-          (error, result) => {
-            if (error) {
-              reject(error);
-            } else {
-              resolve({
-                url: result.secure_url,
-                publicId: result.public_id,
-                width: result.width,
-                height: result.height,
-                thumbnail: cloudinary.url(result.public_id, { width: 300, height: 300, crop: 'fill' }),
-                hash,
-              });
-            }
-          }
-        );
-        stream.end(file.buffer);
+    try {
+      cloudinary.config({
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        api_secret: process.env.CLOUDINARY_API_SECRET,
       });
-    });
 
-    const results = await Promise.all(uploadPromises);
+      console.log('Upload request received');
+      console.log('Files:', req.files ? `${req.files.length} files` : 'missing');
 
-    res.json(results);
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ error: 'Upload failed' });
-  }
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'No files uploaded' });
+      }
+
+      const uploadPromises = req.files.map(file => {
+        return new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              folder: 'photos',
+              resource_type: 'auto',
+              // Optimize for DSLR images - maintain quality
+              quality: 'auto',
+              format: 'auto'
+            },
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary upload error:', error);
+                reject(error);
+              } else {
+                resolve({
+                  url: result.secure_url,
+                  publicId: result.public_id,
+                  width: result.width,
+                  height: result.height,
+                  thumbnail: cloudinary.url(result.public_id, { width: 300, height: 300, crop: 'fill' }),
+                });
+              }
+            }
+          );
+          stream.end(file.buffer);
+        });
+      });
+
+      const results = await Promise.all(uploadPromises);
+
+      res.json(results);
+    } catch (error) {
+      console.error('Upload processing error:', error);
+      res.status(500).json({ error: 'Internal server error during upload processing' });
+    }
+  });
 });
 
 
