@@ -1,7 +1,9 @@
 const express = require('express');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const crypto = require('crypto');
 const auth = require('../middleware/auth');
+const Photo = require('../models/Photo');
 
 const router = express.Router();
 
@@ -44,7 +46,15 @@ router.post('/photo', auth, upload.array('files', 10), async (req, res) => {
       return res.status(400).json({ error: 'No files uploaded' });
     }
 
-    const uploadPromises = req.files.map(file => {
+    // Check for duplicates
+    const hashes = req.files.map(file => crypto.createHash('sha256').update(file.buffer).digest('hex'));
+    const existingPhotos = await Photo.find({ hash: { $in: hashes } });
+    if (existingPhotos.length > 0) {
+      return res.status(400).json({ error: 'Duplicate images detected. Some images already exist.' });
+    }
+
+    const uploadPromises = req.files.map((file, index) => {
+      const hash = hashes[index];
       return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
           {
@@ -61,6 +71,7 @@ router.post('/photo', auth, upload.array('files', 10), async (req, res) => {
                 width: result.width,
                 height: result.height,
                 thumbnail: cloudinary.url(result.public_id, { width: 300, height: 300, crop: 'fill' }),
+                hash,
               });
             }
           }

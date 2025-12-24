@@ -11,6 +11,7 @@ const photoSchema = new mongoose.Schema({
   width: { type: Number, default: 0 },
   height: { type: Number, default: 0 },
   downloads: { type: Number, default: 0 },
+  hash: { type: String, required: true, unique: true },
 }, { timestamps: true });
 
 // Transform _id to id when converting to JSON
