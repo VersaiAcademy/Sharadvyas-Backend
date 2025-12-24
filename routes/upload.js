@@ -95,10 +95,9 @@ router.post('/photo', auth, (req, res) => {
           const stream = cloudinary.uploader.upload_stream(
             {
               folder: 'photos',
-              resource_type: 'auto',
+              resource_type: 'image', // Explicitly set for images
               // Optimize for DSLR images - maintain quality
-              quality: 'auto',
-              format: 'auto',
+              quality: 'auto', // Safe optimization
               timeout: 60000 // 60 second timeout
             },
             (error, result) => {
@@ -166,4 +165,4 @@ router.post('/photo', auth, (req, res) => {
 });
 
 
-module.exports = router;
+module.exports = router;ss
