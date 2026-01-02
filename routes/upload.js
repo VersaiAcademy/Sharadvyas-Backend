@@ -167,30 +167,30 @@ router.post('/photo', auth, (req, res) => {
       console.log(`Processing ${uploadPromises.length} files...`);
       
       // Process uploads sequentially to avoid overwhelming Cloudinary
-      const results = [];
+      const fileResults = [];
       for (let i = 0; i < uploadPromises.length; i++) {
         try {
           const result = await uploadPromises[i];
-          results.push(result);
+          fileResults.push({
+            status: 'success',
+            fileIndex: i + 1,
+            ...result
+          });
           console.log(`File ${i + 1} processed successfully`);
         } catch (error) {
           console.error(`File ${i + 1} processing failed:`, error);
-          results.push({ error: error.message, fileIndex: i + 1 });
+          fileResults.push({
+            status: 'error',
+            fileIndex: i + 1,
+            error: error.message
+          });
         }
       }
       
-      // Separate successful and failed uploads
-      const successful = results.filter(r => !r.error);
-      const failed = results.filter(r => r.error);
+      console.log(`${fileResults.filter(r => r.status === 'success').length} files processed successfully, ${fileResults.filter(r => r.status === 'error').length} failed`);
       
-      console.log(`${successful.length} files processed successfully, ${failed.length} failed`);
-      
-      // Return response with both successful and failed files
-      res.json({
-        successful,
-        failed: failed.map(f => ({ fileIndex: f.fileIndex, error: f.error })),
-        message: failed.length > 0 ? 'Some files failed to upload' : 'All files uploaded successfully'
-      });
+      // Return array of results for frontend compatibility
+      res.json(fileResults);
     } catch (error) {
       console.error('Upload processing error:', error);
       res.status(500).json({ error: 'Internal server error during upload processing' });
