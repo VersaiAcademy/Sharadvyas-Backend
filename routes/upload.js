@@ -3,28 +3,28 @@ const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
 const cloudinary = require('cloudinary').v2;
+const sharp = require('sharp');
 const auth = require('../middleware/auth');
 const Photo = require('../models/Photo');
 
 const router = express.Router();
 
-// Multer configuration for DSLR images
+// Multer configuration for DSLR images - NO file size limits from backend
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB per file
-    files: 10 // Max 10 files
+    files: 10 // Max 10 files, no size limit per file
   },
   fileFilter: (req, file, cb) => {
     // Accept common DSLR image formats
-    const allowedTypes = /jpeg|jpg|png|webp|heic/;
+    const allowedTypes = /jpeg|jpg|png|webp|heic|tiff|tif/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
 
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      return cb(new Error('Invalid file type. Only images (jpg, jpeg, png, webp, heic) are allowed.'));
+      return cb(new Error('Invalid file type. Only images (jpg, jpeg, png, webp, heic, tiff, tif) are allowed.'));
     }
   }
 });
@@ -53,10 +53,6 @@ router.post('/photo', auth, (req, res) => {
     // Handle Multer errors explicitly
     if (err) {
       console.error('Multer error:', err);
-      
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(413).json({ error: 'File too large. Maximum size is 25MB per file.' });
-      }
       
       if (err.code === 'LIMIT_FILE_COUNT') {
         return res.status(400).json({ error: 'Too many files. Maximum 10 files allowed.' });
@@ -87,8 +83,31 @@ router.post('/photo', auth, (req, res) => {
       const uploadPromises = req.files.map(async (file, index) => {
         console.log(`Processing file ${index + 1}: ${file.originalname} (${file.size} bytes)`);
         
-        // Generate hash from file buffer
-        const hash = crypto.createHash('sha256').update(file.buffer).digest('hex');
+        // Validate file buffer
+        if (!file.buffer || file.buffer.length === 0) {
+          throw new Error(`Invalid file buffer for ${file.originalname}`);
+        }
+        
+        // Compress image to reduce size for Cloudinary upload (handles large files)
+        // This removes backend file size limitations by compressing large images before upload
+        // Ensures compatibility with Cloudinary's plan limits while allowing unlimited input sizes
+        console.log(`Compressing file ${index + 1} (${file.size} bytes)...`);
+        let compressedBuffer;
+        try {
+          const metadata = await sharp(file.buffer).metadata();
+          compressedBuffer = await sharp(file.buffer)
+            .resize(3000, 3000, { fit: 'inside', withoutEnlargement: true }) // Max 3000px, preserve aspect
+            .toFormat(metadata.format, { quality: 80 }) // Compress with 80% quality
+            .toBuffer();
+          console.log(`Compressed file ${index + 1} to ${compressedBuffer.length} bytes`);
+        } catch (compressionError) {
+          console.error(`Compression failed for file ${index + 1}:`, compressionError);
+          // If compression fails, use original buffer
+          compressedBuffer = file.buffer;
+        }
+        
+        // Generate hash from compressed buffer for deduplication
+        const hash = crypto.createHash('sha256').update(compressedBuffer).digest('hex');
         console.log(`Generated hash for file ${index + 1}: ${hash.substring(0, 16)}...`);
         
         // Check if photo with this hash already exists
@@ -104,11 +123,6 @@ router.post('/photo', auth, (req, res) => {
             hash,
             reused: true
           };
-        }
-        
-        // Validate file buffer
-        if (!file.buffer || file.buffer.length === 0) {
-          throw new Error(`Invalid file buffer for ${file.originalname}`);
         }
         
         // Upload to Cloudinary
@@ -146,7 +160,7 @@ router.post('/photo', auth, (req, res) => {
             reject(new Error(`Stream error for ${file.originalname}: ${streamError.message}`));
           });
           
-          stream.end(file.buffer);
+          stream.end(compressedBuffer);
         });
       });
 
@@ -169,17 +183,14 @@ router.post('/photo', auth, (req, res) => {
       const successful = results.filter(r => !r.error);
       const failed = results.filter(r => r.error);
       
-      if (successful.length === 0) {
-        return res.status(500).json({ error: 'All uploads failed: ' + failed.map(f => f.error).join('; ') });
-      }
+      console.log(`${successful.length} files processed successfully, ${failed.length} failed`);
       
-      // Return successful uploads, log failures
-      if (failed.length > 0) {
-        console.warn('Partial upload failure:', failed);
-      }
-      
-      console.log(`${successful.length} files processed successfully`);
-      res.json(successful);
+      // Return response with both successful and failed files
+      res.json({
+        successful,
+        failed: failed.map(f => ({ fileIndex: f.fileIndex, error: f.error })),
+        message: failed.length > 0 ? 'Some files failed to upload' : 'All files uploaded successfully'
+      });
     } catch (error) {
       console.error('Upload processing error:', error);
       res.status(500).json({ error: 'Internal server error during upload processing' });
